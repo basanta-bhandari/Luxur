@@ -1,206 +1,184 @@
-from AppOpener import close, open as appopen
-from webbrowser import open as webopen
-from pywhatkit import search, playonyt
-from dotenv import dotenv_values
+"""Desktop automation: open/close apps, web & YouTube search, content writing, volume.
+
+Windows is the supported platform. The `not IS_WINDOWS` branches are a minimal
+Linux shim so the app can be smoke-tested on Linux; they are not maintained.
+"""
+import asyncio
+import re
+import shutil
+import subprocess
+import webbrowser
+from urllib.parse import quote_plus
+
+import requests
 from bs4 import BeautifulSoup
 from rich import print
-from groq import Groq
-import webbrowser
-import subprocess
-import requests
-import keyboard
-import asyncio
-import os
 
-env_vars = dotenv_values(".env")
-GroqAPIKey = env_vars.get("GroqAPIKey")
+from Backend.Chatbot import StreamCompletion
+from Backend.Common import DATA_DIR, IS_WINDOWS, Assistantname, Username
 
-classes = [
-    "zCubwf",
-    "hgKElc",
-    "LTKOO sY7ric",
-    "Z0LcW",
-    "gsrt vk_bk FzvWSb YwPhnf",
-    "pclqee",
-    "tw-Data-text tw-text-small tw-ta",
-    "IZ6rdc",
-    "O5Ur6d LTKOO",
-    "vlzY6d",
-    "webanswers-webanswers_table__webanswers-table",
-    "dDoNo ikb4Bb gsrt",
-    "sXLaOe",
-    "LWkfKe",
-    "VQF4g",
-    "qv3Wpe",
-    "kno-rdesc",
-    "SPZz6b"
-]
+if IS_WINDOWS:
+    import keyboard
+    from AppOpener import close as appclose, open as appopen
 
-useragent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36'
-client = Groq(api_key=GroqAPIKey)
-professional_resonse= [
-    "Your stafisfaction is my priority bitch feel free to reach dont hide like coward, I am here to help you with any questions or concerns you may have.",
-    "I am here to provide you with the best possible assistance, so please don't hesitate to reach out to me with any questions or concerns you may have."
-]
+useragent = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
-messages = []
+ContentWriterSystem = [{
+    "role": "system",
+    "content": f"Hello, I am {Username}. You are {Assistantname}, a content writer. "
+               "You write content such as letters, code, applications, essays, notes, songs and poems. "
+               "Write the requested content directly, with proper grammar and formatting.",
+}]
 
-SystemChatBot= [{ "role": "system", "content": f"Hello, I am {os.environ.get('Username')}, You are a very accurate and advanced AI chatbot named {os.environ.get('Assistantname')} which has real-time up-to-date information from the internet. *** Provide Answers In a Professional Way, make sure to add full stops, commas, question marks, and use proper grammar.*** *** Just answer the question from the provided data in a professional way. ***"}]
+
+def OpenInEditor(path):
+    """Open a text file in Notepad (or the default app on Linux)."""
+    if IS_WINDOWS:
+        subprocess.Popen(["notepad.exe", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 
 def GoogleSearch(Topic):
-    search(Topic)
+    webbrowser.open(f"https://www.google.com/search?q={quote_plus(Topic)}")
     return True
 
+
 def Content(Topic):
-    def OpenNotepad(file_path):
-        default_text_editor = 'notepad.exe'
-        subprocess.Popen([default_text_editor, file_path])
-
-    def ContentWriterAI(prompt):
-        messages.append({"role": "user", "content": f"{prompt}"})
-        completion = client.chat.completions.create(
-            model="mixtral-8x7b-32768",
-            messages=SystemChatBot + messages,
-            max_tokens=2048,
-            temperature=0.7,
-            top_p=1,
-            stream=True,
-            stop=None,
+    Topic = Topic.strip()
+    try:
+        ContentByAI = StreamCompletion(
+            ContentWriterSystem + [{"role": "user", "content": Topic}], max_tokens=2048
         )
-        Answer = ""
+    except Exception as e:
+        print(f"[red]Content writer failed: {e}[/red]")
+        return False
 
-        for chunk in completion:
-            if "choices" in chunk:
-                for choice in chunk["choices"]:
-                    if getattr(choice.delta, "content", None):
-                        Answer += choice.delta.content
-                Answer = Answer.replace("</s>", "")
-                messages.append({"role": "assistant", "content": f"{Answer}"})
-                return Answer
-
-        return ""
-
-    cleaned_topic = Topic.replace("Content", "")
-    ContentByAI = ContentWriterAI(cleaned_topic)
-
-    file_path = rf"Data\{cleaned_topic.lower().replace(' ', '')}.txt"
-    with open(file_path, "w", encoding="utf-8") as file:
-        file.write(ContentByAI)
-
-    OpenNotepad(file_path)
+    safe_name = re.sub(r"[^a-z0-9]+", "_", Topic.lower()).strip("_")[:60] or "content"
+    file_path = DATA_DIR / f"{safe_name}.txt"
+    file_path.write_text(ContentByAI, encoding="utf-8")
+    OpenInEditor(file_path)
     return True
 
 
 def YoutubeSearch(Topic):
-    Url4Search = f"https://www.youtube.com/results?search_query={Topic}"
-    webopen(Url4Search)
+    webbrowser.open(f"https://www.youtube.com/results?search_query={quote_plus(Topic)}")
     return True
 
 
 def PlayYoutube(query):
-    playonyt(query)
+    """Open the first YouTube result for `query`, or the results page if none is found."""
+    url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+    try:
+        html = requests.get(url, headers={"User-Agent": useragent}, timeout=10).text
+        match = re.search(r'"videoId":"([\w-]{11})"', html) or re.search(r"watch\?v=([\w-]{11})", html)
+        if match:
+            url = f"https://www.youtube.com/watch?v={match.group(1)}"
+    except requests.RequestException as e:
+        print(f"[yellow]YouTube lookup failed, opening search page: {e}[/yellow]")
+    webbrowser.open(url)
     return True
 
 
-def OpenApp(app, sess=requests.Session()):
+def OpenWebsiteFor(app):
+    """Fallback when no installed app matches: open the top Google result for it."""
     try:
-        appopen(app, match_closest=True, output=True, throw_errors=True)
-        return True
-    except:
-        def extract_links(html):
-            if html is None:
-                return []
-            soup = BeautifulSoup(html, 'html.parser')
-            links = soup.find.all('a', {'jsname': 'UWckNb '})
-            return [link.get('href') for link in links]
+        html = requests.get(f"https://www.google.com/search?q={quote_plus(app)}",
+                            headers={"User-Agent": useragent}, timeout=10).text
+        soup = BeautifulSoup(html, "html.parser")
+        links = [a.get("href") for a in soup.find_all("a", {"jsname": "UWckNb"}) if a.get("href")]
+        if links:
+            webbrowser.open(links[0])
+            return True
+    except requests.RequestException as e:
+        print(f"[yellow]Google lookup failed: {e}[/yellow]")
+    return GoogleSearch(app)
 
-        def search_google(query):
-            url = f"https://www.google.com/search?q={query}"
-            headers = {'User-Agent': useragent}
-            response = sess.get(url, headers=headers)
-            if response.status_code == 200:
-                return response.text
-            else:
-                return None
-        html= search_google(app)
-        if html:
-            links = extract_links(html)
-            webopen(link)
+
+def OpenApp(app):
+    if IS_WINDOWS:
+        try:
+            appopen(app, match_closest=True, output=True, throw_errors=True)
+            return True
+        except Exception:
+            return OpenWebsiteFor(app)
+
+    executable = shutil.which(app.lower().replace(" ", "-")) or shutil.which(app.lower().replace(" ", ""))
+    if executable:
+        subprocess.Popen([executable], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
         return True
+    return OpenWebsiteFor(app)
+
 
 def CloseApp(app):
-    if CloseApp(app):
-        if "chrome" in app:
-            pass
+    try:
+        if IS_WINDOWS:
+            appclose(app, match_closest=True, output=True, throw_errors=True)
         else:
-            try:
-                close(app, match_closest=True, output=True, throw_errors=True)
-                return True
-            except:
-                return False
+            subprocess.run(["pkill", "-i", "-x", app.lower().replace(" ", "")], check=False)
+        return True
+    except Exception as e:
+        print(f"[red]Could not close {app}: {e}[/red]")
+        return False
 
 
 def System(command):
-    def mute():
-        keyboard.press_and_release('volume mute')
-    def unmute():
-        keyboard.press_and_release('volume mute')
-    def volumeup():
-        keyboard.press_and_release('volume up')
-    def volumedown():
-        keyboard.press_and_release('volume down')
+    command = command.strip().lower().replace(" ", "")
+    if IS_WINDOWS:
+        keys = {"mute": "volume mute", "unmute": "volume mute",
+                "volumeup": "volume up", "volumedown": "volume down"}
+        if command in keys:
+            keyboard.press_and_release(keys[command])
+            return True
+    else:
+        sink = "@DEFAULT_SINK@"
+        args = {"mute": ["set-sink-mute", sink, "1"], "unmute": ["set-sink-mute", sink, "0"],
+                "volumeup": ["set-sink-volume", sink, "+10%"], "volumedown": ["set-sink-volume", sink, "-10%"]}
+        if command in args and shutil.which("pactl"):
+            subprocess.run(["pactl", *args[command]], check=False)
+            return True
+    print(f"[red]Unknown system command: {command}[/red]")
+    return False
 
-    if command == "mute":
-        mute()
-    elif command == "unmute":
-        unmute()
-    elif command == "volumeup":
-        volumeup()
-    elif command == "volumedown":
-        volumedown()
-    return True
 
-async def TranslateAnsExecute(commands: list[str]):
-    funcs= []
+# Prefix -> handler. Order matters: longer prefixes that overlap must come first.
+HANDLERS = [
+    ("google search ", GoogleSearch),
+    ("youtube search ", YoutubeSearch),
+    ("open ", OpenApp),
+    ("close ", CloseApp),
+    ("play ", PlayYoutube),
+    ("content ", Content),
+    ("system ", System),
+]
+
+# Categories the decision model can return that are handled elsewhere (or not yet).
+NOT_AUTOMATION = ("general", "realtime", "generate image", "reminder", "exit")
+
+
+async def TranslateAndExecute(commands: list[str]):
+    funcs = []
     for command in commands:
-        if command.startswith("open "):
-            if "open it" in command:
-                pass
-            if "open file" in command:
-                pass
-            else:
-                fun= asyncio.to_thread(OpenApp, command.removeprefix("open "))
-                funcs.append(fun)
-
-        elif command.startswith("general "):
-            pass
-        elif command.startswith("realtime "):
-            pass
-        elif command.startswith("close "):
-            fun = asyncio.to_thread(CloseApp, command.removeprefix("close "))
-            funcs.append(fun)
-        elif command.startswith("play "):
-            fun = asyncio.to_thread(PlayYoutube, command.removeprefix("play "))
-            funcs.append(fun)
-        elif command.startswith("content "):
-            fun = asyncio.to_thread(GoogleSearch, command.removeprefix("content "))
-            funcs.append(fun)     
-        elif command.startswith("youtube search "):
-            fun = asyncio.to_thread(YoutubeSearch, command.removeprefix("youtube search "))
-            funcs.append(fun)
-        elif command.startswith("system "):
-            fun = asyncio.to_thread(System, command.removeprefix("system "))
-            funcs.append(fun)
+        if command.startswith(NOT_AUTOMATION):
+            continue
+        if command in ("open it", "open file") or command.startswith("open file "):
+            continue
+        for prefix, handler in HANDLERS:
+            if command.startswith(prefix):
+                funcs.append(asyncio.to_thread(handler, command.removeprefix(prefix)))
+                break
         else:
             print(f"[red]Unknown command: {command}[/red]")
-    results=await asyncio.gather(*funcs)
-    for result in results:
-        if isinstance(result, str):
-            yield result
-        else:
-            yield result
+
+    for result in await asyncio.gather(*funcs, return_exceptions=True):
+        if isinstance(result, Exception):
+            print(f"[red]Automation error: {result}[/red]")
+        yield result
+
 
 async def Automation(commands: list[str]):
-    async for result in TranslateAnsExecute(commands):
+    async for _ in TranslateAndExecute(commands):
         pass
     return True

@@ -1,0 +1,13 @@
+# Secrets
+.env
+
+# Runtime state written by the app
+L.U.X.U.R.O.S - Copy/Frontend/Files/*.data
+L.U.X.U.R.O.S - Copy/Data/*
+!L.U.X.U.R.O.S - Copy/Data/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

@@ -1,15 +1,15 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-from dotenv import dotenv_values
-import os
+"""Speech recognition through Chrome's Web Speech API, driven headlessly by Selenium."""
+import atexit
+from time import sleep
+
 import mtranslate as mt
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 
-env_var = dotenv_values(".env")
-
-InputLanguage = env_var.get("InputLanguage")
+from Backend.Common import (
+    DATA_DIR, InputLanguage, GetMicrophoneStatus, QueryModifier, SetAssistantStatus,
+)
 
 HtmlCode = '''<!DOCTYPE html>
 <html lang="en">
@@ -23,10 +23,12 @@ HtmlCode = '''<!DOCTYPE html>
     <script>
         const output = document.getElementById('output');
         let recognition;
+        let listening = false;
 
         function startRecognition() {
-            recognition = new webkitSpeechRecognition() || new SpeechRecognition();
-            recognition.lang = '';
+            const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new Recognition();
+            recognition.lang = '__LANG__';
             recognition.continuous = true;
 
             recognition.onresult = function(event) {
@@ -35,97 +37,76 @@ HtmlCode = '''<!DOCTYPE html>
             };
 
             recognition.onend = function() {
-                recognition.start();
+                if (listening) recognition.start();
             };
+            listening = true;
             recognition.start();
         }
 
         function stopRecognition() {
-            recognition.stop();
-            output.innerHTML = "";
+            listening = false;
+            if (recognition) recognition.stop();
+            output.textContent = "";
         }
     </script>
 </body>
 </html>'''
 
-HtmlCode = str(HtmlCode).replace("recognition.lang = '';", f"recognition.lang = '{InputLanguage}';")
+VOICE_HTML = DATA_DIR / "voice.html"
 
-with open(r"Data\Voice.html", "w") as f:
-    f.write(HtmlCode)
+_driver = None
 
 
-current_dir= os.getcwd()
+def Driver():
+    """Start headless Chrome on first use (Selenium Manager fetches the driver)."""
+    global _driver
+    if _driver is None:
+        VOICE_HTML.write_text(HtmlCode.replace("__LANG__", InputLanguage), encoding="utf-8")
+        options = Options()
+        options.add_argument("--use-fake-ui-for-media-stream")  # auto-allow microphone access
+        options.add_argument("--headless=new")
+        _driver = webdriver.Chrome(options=options)
+        atexit.register(Shutdown)
+    return _driver
 
-link = f"{current_dir}/Data/Voice.html"
 
-chrome_options = Options()
-user_agent = "Mozilla/5.0(Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.142.86 Safari/537.36"
-chrome_options.add_argument(f'user-agent={user_agent}')
-chrome_options.add_argument("--use-fake-ui-for-media-stream")
-chrome_options.add_argument("--use-fake-device-for-media-stream")
-chrome_options.add_argument("--headless=new")
+def Shutdown():
+    """Close headless Chrome so it doesn't outlive the app."""
+    global _driver
+    if _driver is not None:
+        try:
+            _driver.quit()
+        except Exception:
+            pass
+        _driver = None
 
-Service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service, options=chrome_options)
-
-TempDirPath = rf"{current_dir}/Frontend/Files"
-
-def SetAssistantStatus(Status):
-    with open(rf'{TempDirPath}/Status.data', "w", encoding='utf-8') as file:
-        file.write(Status)
-
-def QueryModifier(Query):
-    new_query = Query.lower().strip()
-    if not new_query:
-        return new_query
-
-    query_words = new_query.split()
-    question_words = ["how", "what", "who", "where", "when", "why", "which", "whose", "whom", "can you", "what's", "where's", "how's", "can you"]
-
-    if any(word+ " " in new_query for word in question_words):
-        if query_words[-1][-1] in ['.', '?', '!']:
-            new_query = new_query[:-1]+ "?"
-        else:
-            new_query += "?"
-    else:
-        if query_words[-1][-1] in ['.', '?', '!']:
-                    new_query = new_query[:-1]+ "."
-        else:
-            new_query += "."
-    return new_query.capitalize()
 
 def UniversalTranslator(Text):
-    english_translator = mt.translate(Text, "en", "auto")
-    return english_translator.capitalize()
+    return mt.translate(Text, "en", "auto").capitalize()
+
 
 def SpeechRecognition():
-    driver.get("file:///" + link)
+    """Block until something is heard. Returns "" if the mic is switched off first."""
+    driver = Driver()
+    driver.get(VOICE_HTML.as_uri())
     driver.find_element(by=By.ID, value="start").click()
 
-    while True:
-         try:
+    try:
+        while GetMicrophoneStatus() == "True":
             Text = driver.find_element(by=By.ID, value="output").text
-
             if Text:
-                   driver.find_element(by=By.ID, value="end").click()
-
-                   if InputLanguage.lower() == "en" or "en" in InputLanguage.lower():
-                       return QueryModifier(Text)
-                   else:
-                       SetAssistantStatus("Translating bitchh ...")
-                       return QueryModifier(UniversalTranslator(Text))
-         except Exception as e:
-             pass
-
-if __name__=="__main__":
-     while True:
-          Text = SpeechRecognition()
-          print(Text)
+                if InputLanguage.lower().startswith("en"):
+                    return QueryModifier(Text)
+                SetAssistantStatus("Translating ...")
+                return QueryModifier(UniversalTranslator(Text))
+            sleep(0.2)
+        return ""
+    finally:
+        driver.find_element(by=By.ID, value="end").click()
 
 
-
-
-
-
-
-
+if __name__ == "__main__":
+    from Backend.Common import SetMicrophoneStatus
+    SetMicrophoneStatus("True")
+    while True:
+        print(SpeechRecognition())

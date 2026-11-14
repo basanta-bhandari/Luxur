@@ -1,24 +1,23 @@
-import cohere 
+import cohere
 from rich import print
-from dotenv import dotenv_values 
-from pathlib import Path
 
-env_path = Path(__file__).resolve().parents[1] / ".env"
-env_var = dotenv_values(env_path)
-cohereAPIKey= env_var.get("CohereAPIKey")
-if not cohereAPIKey:
-    raise RuntimeError(f"CohereAPIKey was not found in {env_path}")
+from Backend.Common import CohereModel, RequireEnv
 
-co = cohere.Client(api_key=cohereAPIKey)
+_co = None
 
-#let define a list recog function aka keyboard hai ta
+
+def CohereClient():
+    global _co
+    if _co is None:
+        _co = cohere.Client(api_key=RequireEnv("CohereAPIKey"))
+    return _co
 
 funcs=[
     "exit", "general", "realtime", "open", "close", "play", "generate image", "system", "content", 
     "google search", "youtube search", "reminder"
 ]
 
-# premble text to guife ai for catgogaries quirees
+# Instructions that make the model classify queries instead of answering them.
 preamble =  """
 You are a very accurate Decision-Making Model, which decides what kind of a query is given to you.
 You will decide whether a query is a 'general' query, a 'realtime' query, or is asking to perform any task or automation like 'open facebook, instagram', 'can you write a application and open it in notepad'
@@ -39,7 +38,7 @@ You will decide whether a query is a 'general' query, a 'realtime' query, or is 
 *** Respond with 'general (query)' if you can't decide the kind of query or if a query is asking to perform a task which is not mentioned above. ***
 """
 
-#define chat hsitroy
+# Few-shot examples.
 ChatHistory = [
     {"role": "User", "message": "How are you?"},
     {"role": "Chatbot", "message": "general how are you?"},
@@ -57,25 +56,21 @@ ChatHistory = [
     {"role": "Chatbot", "message": "generate image a cat playing piano"},
 ]
 
-#decisoion making
 def FirstLayerDMM(prompt: str="test"):
-    stream = co.chat_stream(
-        model='command-a-plus-05-2026',
+    stream = CohereClient().chat_stream(
+        model=CohereModel,
         message=prompt,
         temperature=0.7,
         chat_history=ChatHistory,
         prompt_truncation="OFF",
         connectors=[],
-        preamble=preamble
-
+        preamble=preamble,
     )
     response = ""
 
-    #iterate over events in steam and sapure text generation events
     for event in stream:
         if event.event_type =="text_generation":
             response += event.text
-            
 
     tasks = [task.strip() for task in response.replace("\n", " ").split(",")]
     tasks = [task for task in tasks if task]
@@ -86,21 +81,13 @@ def FirstLayerDMM(prompt: str="test"):
         if any(task == category or task.startswith(f"{category} ") for category in funcs)
     ]
     if not recognized_tasks:
-        raise ValueError(f"Cohere returned no recognized task categories: {response!r}")
+        # The preamble says to fall back to 'general' when unsure; enforce it here too.
+        print(f"[yellow]Unrecognized decision {response!r}, treating as general.[/yellow]")
+        recognized_tasks = [f"general {prompt}"]
 
     return recognized_tasks
 
 
 if __name__ == "__main__":
     while True:
-        print(FirstLayerDMM(input(">>>")))
- 
-
-
-
- 
-               
-    
-
-
-  
+        print(FirstLayerDMM(input(">>> ")))
